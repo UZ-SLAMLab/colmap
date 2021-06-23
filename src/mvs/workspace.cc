@@ -38,8 +38,7 @@
 namespace colmap {
 namespace mvs {
 
-Workspace::Workspace(const Options& options)
-    : options_(options) {
+Workspace::Workspace(const Options& options) : options_(options) {
   StringToLower(&options_.input_type);
   model_.Read(options_.workspace_path, options_.workspace_format);
   if (options_.max_image_size > 0) {
@@ -102,6 +101,7 @@ void Workspace::Load(const std::vector<std::string>& image_names) {
             << std::endl;
   for (size_t i = 0; i < image_names.size(); ++i) {
     const int image_idx = model_.GetImageIdx(image_names[i]);
+    std::cout << "Name: " << image_names[i] << std::endl;
     if (HasBitmap(image_idx) && HasDepthMap(image_idx)) {
       thread_pool.AddTask(LoadWorkspaceData, image_idx);
     } else {

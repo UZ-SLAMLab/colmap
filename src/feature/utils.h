@@ -40,6 +40,9 @@ namespace colmap {
 std::vector<Eigen::Vector2d> FeatureKeypointsToPointsVector(
     const FeatureKeypoints& keypoints);
 
+std::vector<Eigen::Vector2d> FeatureKeypointsToPointsVector(
+    FeatureKeypoints& keypoints);
+
 // L2-normalize feature descriptor, where each row represents one feature.
 Eigen::MatrixXf L2NormalizeFeatureDescriptors(
     const Eigen::MatrixXf& descriptors);

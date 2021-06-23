@@ -90,6 +90,27 @@ int ShowHelp(
 
 }  // namespace
 
+int RunCreatePositiveExamples(int argc, char** argv) {
+  std::string input_path;
+  std::string output_path;
+
+  colmap::OptionManager options;
+  options.AddRequiredOption("input_path", &input_path);
+  options.AddRequiredOption("output_path", &output_path);
+
+  options.Parse(argc, argv);
+
+  colmap::Reconstruction reconstruction;
+  reconstruction.Read(input_path);
+
+  // Inspect every model based on 3D properties
+  // Add method in Reconstruction
+
+  reconstruction.GeneratePositives(reconstruction, output_path);
+
+  return EXIT_SUCCESS;
+}
+
 int main(int argc, char** argv) {
   using namespace colmap;
 
@@ -124,12 +145,9 @@ int main(int argc, char** argv) {
   commands.emplace_back("model_analyzer", &RunModelAnalyzer);
   commands.emplace_back("model_comparer", &RunModelComparer);
   commands.emplace_back("model_converter", &RunModelConverter);
-  commands.emplace_back("model_cropper", &RunModelCropper);
   commands.emplace_back("model_merger", &RunModelMerger);
   commands.emplace_back("model_orientation_aligner",
                         &RunModelOrientationAligner);
-  commands.emplace_back("model_splitter", &RunModelSplitter);
-  commands.emplace_back("model_transformer", &RunModelTransformer);
   commands.emplace_back("patch_match_stereo", &RunPatchMatchStereo);
   commands.emplace_back("point_filtering", &RunPointFiltering);
   commands.emplace_back("point_triangulator", &RunPointTriangulator);
@@ -143,6 +161,8 @@ int main(int argc, char** argv) {
   commands.emplace_back("vocab_tree_builder", &RunVocabTreeBuilder);
   commands.emplace_back("vocab_tree_matcher", &RunVocabTreeMatcher);
   commands.emplace_back("vocab_tree_retriever", &RunVocabTreeRetriever);
+
+  commands.emplace_back("positive_creator", &RunCreatePositiveExamples);
 
   if (argc == 1) {
     return ShowHelp(commands);

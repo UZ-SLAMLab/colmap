@@ -79,13 +79,13 @@ bool VerifySiftGPUParams(const bool use_gpu) {
 // each setting with the flags
 //
 // -----------------------------------------------------------------------------------
-// |            |                         ImageReaderOptions                         |
-// | CameraMode | single_camera | single_camera_per_folder | single_camera_per_image |
+// |            |                         ImageReaderOptions | | CameraMode |
+// single_camera | single_camera_per_folder | single_camera_per_image |
 // |------------|---------------|--------------------------|-------------------------|
-// | AUTO       | false         | false                    | false                   |
-// | SINGLE     | true          | false                    | false                   |
-// | PER_FOLDER | false         | true                     | false                   |
-// | PER_IMAGE  | false         | false                    | true                    |
+// | AUTO       | false         | false                    | false | | SINGLE |
+// true          | false                    | false                   | |
+// PER_FOLDER | false         | true                     | false | | PER_IMAGE
+// | false         | false                    | true                    |
 // -----------------------------------------------------------------------------------
 //
 // Note: When using AUTO mode a camera model will be uniquely identified by the
@@ -201,10 +201,10 @@ int RunFeatureImporter(int argc, char** argv) {
   OptionManager options;
   options.AddDatabaseOptions();
   options.AddImageOptions();
+  options.AddExtractionOptions();
   options.AddDefaultOption("camera_mode", &camera_mode);
   options.AddRequiredOption("import_path", &import_path);
   options.AddDefaultOption("image_list_path", &image_list_path);
-  options.AddExtractionOptions();
   options.Parse(argc, argv);
 
   ImageReaderOptions reader_options = *options.image_reader;

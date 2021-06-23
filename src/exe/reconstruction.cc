@@ -34,10 +34,12 @@
 #include <fstream>
 
 #include "base/database_cache.h"
-#include "base/gps.h"
 #include "base/pose.h"
 #include "base/projection.h"
+#include "base/similarity_transform.h"
 #include "base/triangulation.h"
+#include "estimators/similarity_transform.h"
+#include "optim/loransac.h"
 #include "util/bitmap.h"
 #include "util/misc.h"
 #include "util/ply.h"
@@ -122,7 +124,6 @@ void Reconstruction::SetUp(const CorrespondenceGraph* correspondence_graph) {
 
 void Reconstruction::TearDown() {
   correspondence_graph_ = nullptr;
-  image_pair_stats_.clear();
 
   // Remove all not yet registered images.
   std::unordered_set<camera_t> keep_camera_ids;
@@ -334,42 +335,12 @@ void Reconstruction::Normalize(const double extent, const double p0,
     return;
   }
 
-  auto bound = ComputeBoundsAndCentroid(p0, p1, use_images);
+  EIGEN_STL_UMAP(class Image*, Eigen::Vector3d) proj_centers;
 
-  // Calculate scale and translation, such that
-  // translation is applied before scaling.
-  const double old_extent = (std::get<1>(bound) - std::get<0>(bound)).norm();
-  double scale;
-  if (old_extent < std::numeric_limits<double>::epsilon()) {
-    scale = 1;
-  } else {
-    scale = extent / old_extent;
-  }
-
-  SimilarityTransform3 tform(scale, ComposeIdentityQuaternion(),
-                             -scale * std::get<2>(bound));
-  Transform(tform);
-}
-
-Eigen::Vector3d Reconstruction::ComputeCentroid(const double p0,
-                                                const double p1) const {
-  return std::get<2>(ComputeBoundsAndCentroid(p0, p1, false));
-}
-
-std::pair<Eigen::Vector3d, Eigen::Vector3d> Reconstruction::ComputeBoundingBox(
-    const double p0, const double p1) const {
-  auto bound = ComputeBoundsAndCentroid(p0, p1, false);
-  return std::make_pair(std::get<0>(bound), std::get<1>(bound));
-}
-
-std::tuple<Eigen::Vector3d, Eigen::Vector3d, Eigen::Vector3d>
-Reconstruction::ComputeBoundsAndCentroid(const double p0, const double p1,
-                                         const bool use_images) const {
-  const size_t num_elements =
-      use_images ? reg_image_ids_.size() : points3D_.size();
-  if (num_elements == 0) {
-    return std::make_tuple(Eigen::Vector3d(0, 0, 0), Eigen::Vector3d(0, 0, 0),
-                           Eigen::Vector3d(0, 0, 0));
+  for (size_t i = 0; i < reg_image_ids_.size(); ++i) {
+    class Image& image = Image(reg_image_ids_[i]);
+    const Eigen::Vector3d proj_center = image.ProjectionCenter();
+    proj_centers[&image] = proj_center;
   }
 
   // Coordinates of image centers or point locations.
@@ -377,14 +348,13 @@ Reconstruction::ComputeBoundsAndCentroid(const double p0, const double p1,
   std::vector<float> coords_y;
   std::vector<float> coords_z;
   if (use_images) {
-    coords_x.reserve(reg_image_ids_.size());
-    coords_y.reserve(reg_image_ids_.size());
-    coords_z.reserve(reg_image_ids_.size());
-    for (const image_t im_id : reg_image_ids_) {
-      const Eigen::Vector3d proj_center = Image(im_id).ProjectionCenter();
-      coords_x.push_back(static_cast<float>(proj_center(0)));
-      coords_y.push_back(static_cast<float>(proj_center(1)));
-      coords_z.push_back(static_cast<float>(proj_center(2)));
+    coords_x.reserve(proj_centers.size());
+    coords_y.reserve(proj_centers.size());
+    coords_z.reserve(proj_centers.size());
+    for (const auto& proj_center : proj_centers) {
+      coords_x.push_back(static_cast<float>(proj_center.second(0)));
+      coords_y.push_back(static_cast<float>(proj_center.second(1)));
+      coords_z.push_back(static_cast<float>(proj_center.second(2)));
     }
   } else {
     coords_x.reserve(points3D_.size());
@@ -419,7 +389,33 @@ Reconstruction::ComputeBoundsAndCentroid(const double p0, const double p1,
   }
   mean_coord /= P1 - P0 + 1;
 
-  return std::make_tuple(bbox_min, bbox_max, mean_coord);
+  // Calculate scale and translation, such that
+  // translation is applied before scaling.
+  const double old_extent = (bbox_max - bbox_min).norm();
+  double scale;
+  if (old_extent < std::numeric_limits<double>::epsilon()) {
+    scale = 1;
+  } else {
+    scale = extent / old_extent;
+  }
+
+  const Eigen::Vector3d translation = mean_coord;
+
+  // Transform images.
+  for (auto& image_proj_center : proj_centers) {
+    image_proj_center.second -= translation;
+    image_proj_center.second *= scale;
+    const Eigen::Quaterniond quat(
+        image_proj_center.first->Qvec(0), image_proj_center.first->Qvec(1),
+        image_proj_center.first->Qvec(2), image_proj_center.first->Qvec(3));
+    image_proj_center.first->SetTvec(quat * -image_proj_center.second);
+  }
+
+  // Transform points.
+  for (auto& point3D : points3D_) {
+    point3D.second.XYZ() -= translation;
+    point3D.second.XYZ() *= scale;
+  }
 }
 
 void Reconstruction::Transform(const SimilarityTransform3& tform) {
@@ -429,34 +425,6 @@ void Reconstruction::Transform(const SimilarityTransform3& tform) {
   for (auto& point3D : points3D_) {
     tform.TransformPoint(&point3D.second.XYZ());
   }
-}
-
-Reconstruction Reconstruction::Crop(
-    const std::pair<Eigen::Vector3d, Eigen::Vector3d>& bbox) const {
-  // add all cameras and images. Only the registered images will be used.
-  Reconstruction reconstruction;
-  for (const auto& camera_el : cameras_) {
-    reconstruction.AddCamera(camera_el.second);
-  }
-  for (const auto& image_el : images_) {
-    reconstruction.AddImage(image_el.second);
-    auto& image = reconstruction.Image(image_el.first);
-    image.SetRegistered(false);
-    for (point2D_t pid = 0; pid < image.NumPoints2D(); ++pid) {
-      image.ResetPoint3DForPoint2D(pid);
-    }
-  }
-  for (const auto& point_el : points3D_) {
-    const auto& point = point_el.second;
-    if ((point.XYZ().array() >= bbox.first.array()).all() &&
-        (point.XYZ().array() <= bbox.second.array()).all()) {
-      for (const auto& track_el : point.Track().Elements()) {
-        reconstruction.RegisterImage(track_el.image_id);
-      }
-      reconstruction.AddPoint3D(point.XYZ(), point.Track(), point.Color());
-    }
-  }
-  return reconstruction;
 }
 
 bool Reconstruction::Merge(const Reconstruction& reconstruction,
@@ -512,7 +480,7 @@ bool Reconstruction::Merge(const Reconstruction& reconstruction,
   for (const auto& point3D : reconstruction.Points3D()) {
     Track new_track;
     Track old_track;
-    std::unordered_set<point3D_t> old_point3D_ids;
+    std::set<point3D_t> old_point3D_ids;
     for (const auto& track_el : point3D.second.Track().Elements()) {
       if (common_image_ids.count(track_el.image_id) > 0) {
         const auto& point2D =
@@ -545,6 +513,103 @@ bool Reconstruction::Merge(const Reconstruction& reconstruction,
   }
 
   FilterPoints3DWithLargeReprojectionError(max_reproj_error, Point3DIds());
+
+  return true;
+}
+
+bool Reconstruction::Align(const std::vector<std::string>& image_names,
+                           const std::vector<Eigen::Vector3d>& locations,
+                           const int min_common_images) {
+  CHECK_GE(min_common_images, 3);
+  CHECK_EQ(image_names.size(), locations.size());
+
+  // Find out which images are contained in the reconstruction and get the
+  // positions of their camera centers.
+  std::set<image_t> common_image_ids;
+  std::vector<Eigen::Vector3d> src;
+  std::vector<Eigen::Vector3d> dst;
+  for (size_t i = 0; i < image_names.size(); ++i) {
+    const class Image* image = FindImageWithName(image_names[i]);
+    if (image == nullptr) {
+      continue;
+    }
+
+    if (!IsImageRegistered(image->ImageId())) {
+      continue;
+    }
+
+    // Ignore duplicate images.
+    if (common_image_ids.count(image->ImageId()) > 0) {
+      continue;
+    }
+
+    common_image_ids.insert(image->ImageId());
+    src.push_back(image->ProjectionCenter());
+    dst.push_back(locations[i]);
+  }
+
+  // Only compute the alignment if there are enough correspondences.
+  if (common_image_ids.size() < static_cast<size_t>(min_common_images)) {
+    return false;
+  }
+
+  SimilarityTransform3 tform;
+  if (!tform.Estimate(src, dst)) {
+    return false;
+  }
+
+  Transform(tform);
+
+  return true;
+}
+
+bool Reconstruction::AlignRobust(const std::vector<std::string>& image_names,
+                                 const std::vector<Eigen::Vector3d>& locations,
+                                 const int min_common_images,
+                                 const RANSACOptions& ransac_options) {
+  CHECK_GE(min_common_images, 3);
+  CHECK_EQ(image_names.size(), locations.size());
+
+  // Find out which images are contained in the reconstruction and get the
+  // positions of their camera centers.
+  std::set<image_t> common_image_ids;
+  std::vector<Eigen::Vector3d> src;
+  std::vector<Eigen::Vector3d> dst;
+  for (size_t i = 0; i < image_names.size(); ++i) {
+    const class Image* image = FindImageWithName(image_names[i]);
+    if (image == nullptr) {
+      continue;
+    }
+
+    if (!IsImageRegistered(image->ImageId())) {
+      continue;
+    }
+
+    // Ignore duplicate images.
+    if (common_image_ids.count(image->ImageId()) > 0) {
+      continue;
+    }
+
+    common_image_ids.insert(image->ImageId());
+    src.push_back(image->ProjectionCenter());
+    dst.push_back(locations[i]);
+  }
+
+  // Only compute the alignment if there are enough correspondences.
+  if (common_image_ids.size() < static_cast<size_t>(min_common_images)) {
+    return false;
+  }
+
+  LORANSAC<SimilarityTransformEstimator<3>, SimilarityTransformEstimator<3>>
+      ransac(ransac_options);
+
+  const auto report = ransac.Estimate(src, dst);
+
+  if (report.support.num_inliers < static_cast<size_t>(min_common_images)) {
+    return false;
+  }
+
+  Transform(SimilarityTransform3(report.model));
 
   return true;
 }
@@ -763,12 +828,14 @@ void Reconstruction::WriteText(const std::string& path) const {
   WriteCamerasText(JoinPaths(path, "cameras.txt"));
   WriteImagesText(JoinPaths(path, "images.txt"));
   WritePoints3DText(JoinPaths(path, "points3D.txt"));
+  WriteImagesModelText(JoinPaths(path, "camerasModel.txt"));
 }
 
 void Reconstruction::WriteBinary(const std::string& path) const {
   WriteCamerasBinary(JoinPaths(path, "cameras.bin"));
   WriteImagesBinary(JoinPaths(path, "images.bin"));
   WritePoints3DBinary(JoinPaths(path, "points3D.bin"));
+  WriteImagesModelText(JoinPaths(path, "camerasModel.txt"));
 }
 
 std::vector<PlyPoint> Reconstruction::ConvertToPLY() const {
@@ -811,13 +878,9 @@ void Reconstruction::ImportPLY(const std::vector<PlyPoint>& ply_points) {
   }
 }
 
-bool Reconstruction::ExportNVM(const std::string& path,
-                               bool skip_distortion) const {
+bool Reconstruction::ExportNVM(const std::string& path) const {
   std::ofstream file(path, std::ios::trunc);
   CHECK(file.is_open()) << path;
-
-  // Ensure that we don't lose any precision by storing in text.
-  file.precision(17);
 
   // White space added for compatibility with Meshlab.
   file << "NVM_V3 " << std::endl << " " << std::endl;
@@ -830,21 +893,20 @@ bool Reconstruction::ExportNVM(const std::string& path,
     const class Image& image = Image(image_id);
     const class Camera& camera = Camera(image.CameraId());
 
-    double k;
-    if (skip_distortion) {
-      k = 0.0;
-    } else if (camera.ModelId() == SimpleRadialCameraModel::model_id) {
-      k = -1 * camera.Params(SimpleRadialCameraModel::extra_params_idxs[0]);
-    } else {
+    if (camera.ModelId() != SimpleRadialCameraModel::model_id) {
       std::cout << "WARNING: NVM only supports `SIMPLE_RADIAL` camera model."
                 << std::endl;
       return false;
     }
 
+    const double f =
+        camera.Params(SimpleRadialCameraModel::focal_length_idxs[0]);
+    const double k =
+        -1 * camera.Params(SimpleRadialCameraModel::extra_params_idxs[0]);
     const Eigen::Vector3d proj_center = image.ProjectionCenter();
 
     file << image.Name() << " ";
-    file << camera.MeanFocalLength() << " ";
+    file << f << " ";
     file << image.Qvec(0) << " ";
     file << image.Qvec(1) << " ";
     file << image.Qvec(2) << " ";
@@ -896,177 +958,13 @@ bool Reconstruction::ExportNVM(const std::string& path,
   return true;
 }
 
-bool Reconstruction::ExportCam(const std::string& path,
-                               bool skip_distortion) const {
-  CreateImageDirs(path);
-  for (const auto image_id : reg_image_ids_) {
-    std::string name, ext;
-    const class Image& image = Image(image_id);
-    const class Camera& camera = Camera(image.CameraId());
-
-    SplitFileExtension(image.Name(), &name, &ext);
-    name = JoinPaths(path, name + ".cam");
-    std::ofstream file(name, std::ios::trunc);
-
-    CHECK(file.is_open()) << name;
-
-    // Ensure that we don't lose any precision by storing in text.
-    file.precision(17);
-
-    double k1, k2;
-    if (skip_distortion) {
-      k1 = 0.0;
-      k2 = 0.0;
-    } else if (camera.ModelId() == SimpleRadialCameraModel::model_id) {
-      k1 = -1 * camera.Params(SimpleRadialCameraModel::extra_params_idxs[0]);
-      k2 = 0.0;
-    } else if (camera.ModelId() != RadialCameraModel::model_id) {
-      k1 = -1 * camera.Params(RadialCameraModel::extra_params_idxs[0]);
-      k2 = -1 * camera.Params(RadialCameraModel::extra_params_idxs[1]);
-    } else {
-      std::cout << "WARNING: CAM only supports `SIMPLE_RADIAL` and `RADIAL` "
-                   "camera model."
-                << std::endl;
-      return false;
-    }
-
-    const Eigen::Matrix3d rot_mat = image.RotationMatrix();
-    const double max_image_size = std::max(camera.Width(), camera.Height());
-    file << image.Tvec(0) << " " << image.Tvec(1) << " " << image.Tvec(2) << " "
-         << rot_mat(0, 0) << " " << rot_mat(0, 1) << " " << rot_mat(0, 2) << " "
-         << rot_mat(1, 0) << " " << rot_mat(1, 1) << " " << rot_mat(1, 2) << " "
-         << rot_mat(2, 0) << " " << rot_mat(2, 1) << " " << rot_mat(2, 2)
-         << std::endl;
-    file << camera.MeanFocalLength() / max_image_size << " " << k1 << " " << k2
-         << " 1.0 " << camera.PrincipalPointX() / camera.Width() << " "
-         << camera.PrincipalPointY() / camera.Height() << std::endl;
-  }
-
-  return true;
-}
-
-bool Reconstruction::ExportRecon3D(const std::string& path,
-                                   bool skip_distortion) const {
-  std::string base_path = EnsureTrailingSlash(StringReplace(path, "\\", "/"));
-  CreateDirIfNotExists(base_path);
-  base_path = base_path.append("Recon/");
-  CreateDirIfNotExists(base_path);
-  std::string synth_path = base_path + "synth_0.out";
-  std::string image_list_path = base_path + "urd-images.txt";
-  std::string image_map_path = base_path + "imagemap_0.txt";
-
-  std::ofstream synth_file(synth_path, std::ios::trunc);
-  CHECK(synth_file.is_open()) << synth_path;
-  std::ofstream image_list_file(image_list_path, std::ios::trunc);
-  CHECK(image_list_file.is_open()) << image_list_path;
-  std::ofstream image_map_file(image_map_path, std::ios::trunc);
-  CHECK(image_map_file.is_open()) << image_map_path;
-
-  // Ensure that we don't lose any precision by storing in text.
-  synth_file.precision(17);
-
-  // Write header info
-  synth_file << "colmap 1.0" << std::endl;
-  synth_file << reg_image_ids_.size() << " " << points3D_.size() << std::endl;
-
-  std::unordered_map<image_t, size_t> image_id_to_idx_;
-  size_t image_idx = 0;
-
-  // Write image/camera info
-  for (const auto image_id : reg_image_ids_) {
-    const class Image& image = Image(image_id);
-    const class Camera& camera = Camera(image.CameraId());
-
-    double k1, k2;
-    if (skip_distortion) {
-      k1 = 0.0;
-      k2 = 0.0;
-    } else if (camera.ModelId() == SimpleRadialCameraModel::model_id) {
-      k1 = -1 * camera.Params(SimpleRadialCameraModel::extra_params_idxs[0]);
-      k2 = 0.0;
-    } else if (camera.ModelId() != RadialCameraModel::model_id) {
-      k1 = -1 * camera.Params(RadialCameraModel::extra_params_idxs[0]);
-      k2 = -1 * camera.Params(RadialCameraModel::extra_params_idxs[1]);
-    } else {
-      std::cout << "WARNING: Recon3D only supports `SIMPLE_RADIAL` and "
-                   "`RADIAL` camera model."
-                << std::endl;
-      return false;
-    }
-
-    const double scale =
-        1.0 / (double)std::max(camera.Width(), camera.Height());
-    synth_file << scale * camera.MeanFocalLength() << " " << k1 << " " << k2
-               << std::endl;
-    synth_file << QuaternionToRotationMatrix(NormalizeQuaternion(image.Qvec()))
-               << std::endl;
-    synth_file << image.Tvec(0) << " " << image.Tvec(1) << " " << image.Tvec(2)
-               << std::endl;
-
-    image_id_to_idx_[image_id] = image_idx;
-    image_list_file << image.Name() << std::endl
-                    << camera.Width() << " " << camera.Height() << std::endl;
-    image_map_file << image_idx << std::endl;
-
-    image_idx += 1;
-  }
-  image_list_file.close();
-  image_map_file.close();
-
-  // Write point info
-  for (const auto& point3D : points3D_) {
-    auto& p = point3D.second;
-    synth_file << p.XYZ()(0) << " " << p.XYZ()(1) << " " << p.XYZ()(2)
-               << std::endl;
-    synth_file << (int)p.Color(0) << " " << (int)p.Color(1) << " "
-               << (int)p.Color(2) << std::endl;
-
-    std::ostringstream line;
-
-    std::unordered_set<image_t> image_ids;
-    for (const auto& track_el : p.Track().Elements()) {
-      // Make sure that each point only has a single observation per image,
-      // since VisualSfM does not support with multiple observations.
-      if (image_ids.count(track_el.image_id) == 0) {
-        const class Image& image = Image(track_el.image_id);
-        const class Camera& camera = Camera(image.CameraId());
-        const Point2D& point2D = image.Point2D(track_el.point2D_idx);
-
-        const double scale =
-            1.0 / (double)std::max(camera.Width(), camera.Height());
-
-        line << image_id_to_idx_[track_el.image_id] << " ";
-        line << track_el.point2D_idx << " ";
-        // Use a scale of -1.0 to mark as invalid as it is not needed currently
-        line << "-1.0 ";
-        line << (point2D.X() - camera.PrincipalPointX()) * scale << " ";
-        line << (point2D.Y() - camera.PrincipalPointY()) * scale << " ";
-        image_ids.insert(track_el.image_id);
-      }
-    }
-
-    std::string line_string = line.str();
-    line_string = line_string.substr(0, line_string.size() - 1);
-
-    synth_file << image_ids.size() << " ";
-    synth_file << line_string << std::endl;
-  }
-  synth_file.close();
-
-  return true;
-}
-
 bool Reconstruction::ExportBundler(const std::string& path,
-                                   const std::string& list_path,
-                                   bool skip_distortion) const {
+                                   const std::string& list_path) const {
   std::ofstream file(path, std::ios::trunc);
   CHECK(file.is_open()) << path;
 
   std::ofstream list_file(list_path, std::ios::trunc);
   CHECK(list_file.is_open()) << list_path;
-
-  // Ensure that we don't lose any precision by storing in text.
-  file.precision(17);
 
   file << "# Bundle file v0.3" << std::endl;
 
@@ -1079,18 +977,20 @@ bool Reconstruction::ExportBundler(const std::string& path,
     const class Image& image = Image(image_id);
     const class Camera& camera = Camera(image.CameraId());
 
-    double k1, k2;
-    if (skip_distortion) {
-      k1 = 0.0;
-      k2 = 0.0;
-    } else if (camera.ModelId() == SimplePinholeCameraModel::model_id ||
-               camera.ModelId() == PinholeCameraModel::model_id) {
+    double f;
+    double k1;
+    double k2;
+    if (camera.ModelId() == SimplePinholeCameraModel::model_id ||
+        camera.ModelId() == PinholeCameraModel::model_id) {
+      f = camera.MeanFocalLength();
       k1 = 0.0;
       k2 = 0.0;
     } else if (camera.ModelId() == SimpleRadialCameraModel::model_id) {
+      f = camera.Params(SimpleRadialCameraModel::focal_length_idxs[0]);
       k1 = camera.Params(SimpleRadialCameraModel::extra_params_idxs[0]);
       k2 = 0.0;
     } else if (camera.ModelId() == RadialCameraModel::model_id) {
+      f = camera.Params(RadialCameraModel::focal_length_idxs[0]);
       k1 = camera.Params(RadialCameraModel::extra_params_idxs[0]);
       k2 = camera.Params(RadialCameraModel::extra_params_idxs[1]);
     } else {
@@ -1100,7 +1000,7 @@ bool Reconstruction::ExportBundler(const std::string& path,
       return false;
     }
 
-    file << camera.MeanFocalLength() << " " << k1 << " " << k2 << std::endl;
+    file << f << " " << k1 << " " << k2 << std::endl;
 
     const Eigen::Matrix3d R = image.RotationMatrix();
     file << R(0, 0) << " " << R(0, 1) << " " << R(0, 2) << std::endl;
@@ -1291,7 +1191,7 @@ bool Reconstruction::ExtractColorsForImage(const image_t image_id,
   }
 
   const Eigen::Vector3ub kBlackColor(0, 0, 0);
-  for (const Point2D& point2D : image.Points2D()) {
+  for (const Point2D point2D : image.Points2D()) {
     if (point2D.HasPoint3D()) {
       class Point3D& point3D = Point3D(point2D.Point3DId());
       if (point3D.Color() == kBlackColor) {
@@ -1326,7 +1226,7 @@ void Reconstruction::ExtractColorsForAllImages(const std::string& path) {
       continue;
     }
 
-    for (const Point2D& point2D : image.Points2D()) {
+    for (const Point2D point2D : image.Points2D()) {
       if (point2D.HasPoint3D()) {
         BitmapColor<float> color;
         // COLMAP assumes that the upper left pixel center is (0.5, 0.5).
@@ -1364,7 +1264,7 @@ void Reconstruction::ExtractColorsForAllImages(const std::string& path) {
 }
 
 void Reconstruction::CreateImageDirs(const std::string& path) const {
-  std::unordered_set<std::string> image_dirs;
+  std::set<std::string> image_dirs;
   for (const auto& image : images_) {
     const std::vector<std::string> name_split =
         StringSplit(image.second.Name(), "/");
@@ -1928,6 +1828,47 @@ void Reconstruction::WriteImagesText(const std::string& path) const {
   }
 }
 
+void Reconstruction::WriteImagesModelText(const std::string& path) const {
+  std::ofstream file(path, std::ios::trunc);
+  CHECK(file.is_open()) << path;
+
+  // Ensure that we don't loose any precision by storing in text.
+  file.precision(17);
+
+  for (const auto& image : images_) {
+    if (!image.second.IsRegistered()) {
+      continue;
+    }
+
+    std::unordered_set<image_t> conn_image_ids;
+    // Get frames connected with current image
+
+    for (const Point2D& point2D : image.second.Points2D()) {
+      if (point2D.HasPoint3D()) {
+        const auto& point3D = points3D_.find(point2D.Point3DId());
+        for (const auto& track_elem : point3D->second.Track().Elements()) {
+          conn_image_ids.insert(track_elem.image_id);
+        }
+      }
+    }
+
+    std::ostringstream line;
+    std::string line_string;
+
+    line << image.second.Name() << " ";
+
+    for (const image_t conn_image_id : conn_image_ids) {
+      const auto& conn_image = images_.find(conn_image_id);
+      line << conn_image->second.Name() << " ";
+    }
+
+    file << line.str() << std::endl;
+
+    line.str("");
+    line.clear();
+  }
+}
+
 void Reconstruction::WritePoints3DText(const std::string& path) const {
   std::ofstream file(path, std::ios::trunc);
   CHECK(file.is_open()) << path;
@@ -2111,8 +2052,7 @@ void Reconstruction::ResetTriObservations(const image_t image_id,
   }
 }
 
-void Reconstruction::GeneratePositives(Reconstruction reconstruction,
-                                       const std::string& path) const {
+void Reconstruction::GeneratePositives(Reconstruction reconstruction, const std::string& path) const{
   std::ofstream file(path, std::ios::trunc);
   CHECK(file.is_open()) << path;
 
@@ -2133,7 +2073,9 @@ void Reconstruction::GeneratePositives(Reconstruction reconstruction,
 
     line.str("");
     line.clear();
+    
   }
+
 }
 
 }  // namespace colmap

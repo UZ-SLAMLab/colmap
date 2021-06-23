@@ -33,6 +33,7 @@
 #define COLMAP_SRC_BASE_CAMERA_MODELS_H_
 
 #include <cfloat>
+#include <iostream>
 #include <string>
 #include <vector>
 

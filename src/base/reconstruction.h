@@ -384,6 +384,8 @@ class Reconstruction {
 
   // Create all image sub-directories in the given path.
   void CreateImageDirs(const std::string& path) const;
+  void GeneratePositives(Reconstruction reconstruction,
+                         const std::string& path) const;
 
  private:
   size_t FilterPoints3DWithSmallTriangulationAngle(
@@ -410,7 +412,6 @@ class Reconstruction {
   void WriteCamerasBinary(const std::string& path) const;
   void WriteImagesBinary(const std::string& path) const;
   void WritePoints3DBinary(const std::string& path) const;
-
   void SetObservationAsTriangulated(const image_t image_id,
                                     const point2D_t point2D_idx,
                                     const bool is_continued_point3D);

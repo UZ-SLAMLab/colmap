@@ -31,6 +31,9 @@
 
 #include "estimators/two_view_geometry.h"
 
+#include <cstdlib>
+#include <ctime>
+#include <iostream>
 #include <unordered_set>
 
 #include "base/camera.h"
@@ -45,6 +48,7 @@
 #include "estimators/translation_transform.h"
 #include "optim/loransac.h"
 #include "optim/ransac.h"
+#include "util/math.h"
 #include "util/random.h"
 
 namespace colmap {
@@ -110,14 +114,31 @@ void TwoViewGeometry::Invert() {
   }
 }
 
-void TwoViewGeometry::Estimate(const Camera& camera1,
-                               const std::vector<Eigen::Vector2d>& points1,
-                               const Camera& camera2,
-                               const std::vector<Eigen::Vector2d>& points2,
-                               const FeatureMatches& matches,
-                               const Options& options) {
+void TwoViewGeometry::EstimateCalibrated(const Camera& camera1,
+                                         const FeatureKeypoints& keypoints1,
+                                         const Camera& camera2,
+                                         const FeatureKeypoints& keypoints2,
+                                         const FeatureMatches& matches,
+                                         const Options& options) {
   if (camera1.HasPriorFocalLength() && camera2.HasPriorFocalLength()) {
-    EstimateCalibrated(camera1, points1, camera2, points2, matches, options);
+    EstimateCalibratedGeometry(camera1, keypoints1, camera2, keypoints2,
+                               matches, options);
+  } else {
+    std::cout << "The camera calibration is needed for both images."
+              << std::endl;
+    std::cout << "Please introduce the focal length and the principal point "
+              << "and use the same camera for all images." << std::endl;
+    exit(1);
+  }
+}
+
+void TwoViewGeometry::EstimateInitCalibrated(
+    const Camera& camera1, const std::vector<Eigen::Vector2d>& points1,
+    const Camera& camera2, const std::vector<Eigen::Vector2d>& points2,
+    const FeatureMatches& matches, const Options& options) {
+  if (camera1.HasPriorFocalLength() && camera2.HasPriorFocalLength()) {
+    EstimateInitCalibratedGeometry(camera1, points1, camera2, points2, matches,
+                                   options);
   } else {
     EstimateUncalibrated(camera1, points1, camera2, points2, matches, options);
   }
@@ -129,10 +150,11 @@ void TwoViewGeometry::EstimateMultiple(
     const FeatureMatches& matches, const Options& options) {
   FeatureMatches remaining_matches = matches;
   std::vector<TwoViewGeometry> two_view_geometries;
+
   while (true) {
     TwoViewGeometry two_view_geometry;
-    two_view_geometry.Estimate(camera1, points1, camera2, points2,
-                               remaining_matches, options);
+    two_view_geometry.EstimateInitCalibrated(camera1, points1, camera2, points2,
+                                             remaining_matches, options);
     if (two_view_geometry.config == ConfigurationType::DEGENERATE) {
       break;
     }
@@ -227,7 +249,115 @@ bool TwoViewGeometry::EstimateRelativePose(
   return true;
 }
 
-void TwoViewGeometry::EstimateCalibrated(
+void TwoViewGeometry::EstimateCalibratedGeometry(
+    const Camera& camera1, const FeatureKeypoints& keypoints1,
+    const Camera& camera2, const FeatureKeypoints& keypoints2,
+    const FeatureMatches& matches, const Options& options) {
+  options.Check();
+
+  if (matches.size() < options.min_num_inliers) {
+    config = ConfigurationType::DEGENERATE;
+    return;
+  }
+
+  // Save the key points in the two-view geometry.
+  keypoints_1 = keypoints1;
+  keypoints_2 = keypoints2;
+
+  // Extract corresponding points.
+  std::vector<Eigen::Vector2d> matched_points1_normalized(matches.size());
+  std::vector<Eigen::Vector2d> matched_points2_normalized(matches.size());
+
+  for (size_t i = 0; i < matches.size(); ++i) {
+    const point2D_t idx1 = matches[i].point2D_idx1;
+    const point2D_t idx2 = matches[i].point2D_idx2;
+
+    Eigen::Vector2d pt_1(keypoints1[idx1].x, keypoints1[idx1].y);
+    Eigen::Vector2d pt_2(keypoints2[idx2].x, keypoints2[idx2].y);
+
+    matched_points1_normalized[i] = camera1.ImageToWorld(pt_1);
+    matched_points2_normalized[i] = camera2.ImageToWorld(pt_2);
+  }
+
+  // Estimate calibrates model.
+
+  auto E_ransac_options = options.ransac_options;
+  E_ransac_options.max_error =
+      (camera1.ImageToWorldThreshold(options.ransac_options.max_error) +
+       camera2.ImageToWorldThreshold(options.ransac_options.max_error)) /
+      2;
+
+  LORANSAC<EssentialMatrixFivePointEstimator, EssentialMatrixFivePointEstimator>
+      E_ransac(E_ransac_options);
+  const auto E_report =
+      E_ransac.Estimate(matched_points1_normalized, matched_points2_normalized);
+  E = E_report.model;
+
+  CHECK_EQ(camera1.FocalLengthX(), camera2.FocalLengthX());
+  CHECK_EQ(camera1.FocalLengthY(), camera2.FocalLengthY());
+
+  // Get coordenates of focal length
+  double f_x = camera1.FocalLengthX();
+  double f_y = camera1.FocalLengthY();
+
+  CHECK_EQ(camera1.PrincipalPointX(), camera2.PrincipalPointX());
+  CHECK_EQ(camera1.PrincipalPointY(), camera2.PrincipalPointY());
+
+  // Get coordenates of principal point
+  double c_x = camera1.PrincipalPointX();
+  double c_y = camera1.PrincipalPointY();
+
+  // Calculate the matrix K
+  Eigen::MatrixXd K(3, 3);
+  K << f_x, 0.0f, c_x, 0.0f, f_y, c_y, 0.0f, 0.0f, 1.0f;
+
+  // Calculate a undistortionated F matrix.
+  F = K.transpose().inverse() * E * K.inverse();
+
+  // Undistortionate key points in both images
+  for (FeatureKeypoint& keypoint : keypoints_1) {
+    Eigen::Vector2d pt_1(keypoint.x, keypoint.y);
+    // Undistortionated key poits coordinates in first image.
+    Eigen::Vector2d und_1 = camera1.ImageToWorld(pt_1);
+    keypoint.x = und_1[0] * f_x + c_x;
+    keypoint.y = und_1[1] * f_y + c_y;
+  }
+
+  for (FeatureKeypoint& keypoint : keypoints_2) {
+    Eigen::Vector2d pt_2(keypoint.x, keypoint.y);
+    // Undistortionated key poits coordinates in second image.
+    Eigen::Vector2d und_2 = camera2.ImageToWorld(pt_2);
+    keypoint.x = und_2[0] * f_x + c_x;
+    keypoint.y = und_2[1] * f_y + c_y;
+  }
+
+  if ((!E_report.success) ||
+      (E_report.support.num_inliers < options.min_num_inliers)) {
+    config = ConfigurationType::DEGENERATE;
+    return;
+  }
+
+  const std::vector<char>* best_inlier_mask = nullptr;
+  size_t num_inliers = 0;
+
+  if (E_report.success &&
+      E_report.support.num_inliers >= options.min_num_inliers) {
+    num_inliers = E_report.support.num_inliers;
+    best_inlier_mask = &E_report.inlier_mask;
+    config = ConfigurationType::CALIBRATED;
+
+  } else {
+    config = ConfigurationType::DEGENERATE;
+    return;
+  }
+
+  if (best_inlier_mask != nullptr) {
+    inlier_matches =
+        ExtractInlierMatches(matches, num_inliers, *best_inlier_mask);
+  }
+}
+
+void TwoViewGeometry::EstimateInitCalibratedGeometry(
     const Camera& camera1, const std::vector<Eigen::Vector2d>& points1,
     const Camera& camera2, const std::vector<Eigen::Vector2d>& points2,
     const FeatureMatches& matches, const Options& options) {
@@ -252,7 +382,7 @@ void TwoViewGeometry::EstimateCalibrated(
     matched_points2_normalized[i] = camera2.ImageToWorld(points2[idx2]);
   }
 
-  // Estimate epipolar models.
+  // Estimate calibrates model.
 
   auto E_ransac_options = options.ransac_options;
   E_ransac_options.max_error =
@@ -266,85 +396,21 @@ void TwoViewGeometry::EstimateCalibrated(
       E_ransac.Estimate(matched_points1_normalized, matched_points2_normalized);
   E = E_report.model;
 
-  LORANSAC<FundamentalMatrixSevenPointEstimator,
-           FundamentalMatrixEightPointEstimator>
-      F_ransac(options.ransac_options);
-  const auto F_report = F_ransac.Estimate(matched_points1, matched_points2);
-  F = F_report.model;
-
-  // Estimate planar or panoramic model.
-
-  LORANSAC<HomographyMatrixEstimator, HomographyMatrixEstimator> H_ransac(
-      options.ransac_options);
-  const auto H_report = H_ransac.Estimate(matched_points1, matched_points2);
-  H = H_report.model;
-
-  if ((!E_report.success && !F_report.success && !H_report.success) ||
-      (E_report.support.num_inliers < options.min_num_inliers &&
-       F_report.support.num_inliers < options.min_num_inliers &&
-       H_report.support.num_inliers < options.min_num_inliers)) {
+  if ((!E_report.success) ||
+      (E_report.support.num_inliers < options.min_num_inliers)) {
     config = ConfigurationType::DEGENERATE;
     return;
   }
 
-  // Determine inlier ratios of different models.
-
-  const double E_F_inlier_ratio =
-      static_cast<double>(E_report.support.num_inliers) /
-      F_report.support.num_inliers;
-  const double H_F_inlier_ratio =
-      static_cast<double>(H_report.support.num_inliers) /
-      F_report.support.num_inliers;
-  const double H_E_inlier_ratio =
-      static_cast<double>(H_report.support.num_inliers) /
-      E_report.support.num_inliers;
-
   const std::vector<char>* best_inlier_mask = nullptr;
   size_t num_inliers = 0;
 
-  if (E_report.success && E_F_inlier_ratio > options.min_E_F_inlier_ratio &&
+  if (E_report.success &&
       E_report.support.num_inliers >= options.min_num_inliers) {
-    // Calibrated configuration.
+    num_inliers = E_report.support.num_inliers;
+    best_inlier_mask = &E_report.inlier_mask;
+    config = ConfigurationType::CALIBRATED;
 
-    // Always use the model with maximum matches.
-    if (E_report.support.num_inliers >= F_report.support.num_inliers) {
-      num_inliers = E_report.support.num_inliers;
-      best_inlier_mask = &E_report.inlier_mask;
-    } else {
-      num_inliers = F_report.support.num_inliers;
-      best_inlier_mask = &F_report.inlier_mask;
-    }
-
-    if (H_E_inlier_ratio > options.max_H_inlier_ratio) {
-      config = PLANAR_OR_PANORAMIC;
-      if (H_report.support.num_inliers > num_inliers) {
-        num_inliers = H_report.support.num_inliers;
-        best_inlier_mask = &H_report.inlier_mask;
-      }
-    } else {
-      config = ConfigurationType::CALIBRATED;
-    }
-  } else if (F_report.success &&
-             F_report.support.num_inliers >= options.min_num_inliers) {
-    // Uncalibrated configuration.
-
-    num_inliers = F_report.support.num_inliers;
-    best_inlier_mask = &F_report.inlier_mask;
-
-    if (H_F_inlier_ratio > options.max_H_inlier_ratio) {
-      config = ConfigurationType::PLANAR_OR_PANORAMIC;
-      if (H_report.support.num_inliers > num_inliers) {
-        num_inliers = H_report.support.num_inliers;
-        best_inlier_mask = &H_report.inlier_mask;
-      }
-    } else {
-      config = ConfigurationType::UNCALIBRATED;
-    }
-  } else if (H_report.success &&
-             H_report.support.num_inliers >= options.min_num_inliers) {
-    num_inliers = H_report.support.num_inliers;
-    best_inlier_mask = &H_report.inlier_mask;
-    config = ConfigurationType::PLANAR_OR_PANORAMIC;
   } else {
     config = ConfigurationType::DEGENERATE;
     return;
@@ -353,12 +419,6 @@ void TwoViewGeometry::EstimateCalibrated(
   if (best_inlier_mask != nullptr) {
     inlier_matches =
         ExtractInlierMatches(matches, num_inliers, *best_inlier_mask);
-
-    if (options.detect_watermark &&
-        DetectWatermark(camera1, matched_points1, camera2, matched_points2,
-                        num_inliers, *best_inlier_mask, options)) {
-      config = ConfigurationType::WATERMARK;
-    }
   }
 }
 

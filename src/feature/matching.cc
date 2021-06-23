@@ -31,7 +31,9 @@
 
 #include "feature/matching.h"
 
+#include <bits/c++config.h>
 #include <fstream>
+#include <iostream>
 #include <numeric>
 
 #include "SiftGPU/SiftGPU.h"
@@ -490,12 +492,13 @@ void GuidedSiftCPUFeatureMatcher::Run() {
         continue;
       }
 
-      const FeatureKeypoints keypoints1 = cache_->GetKeypoints(data.image_id1);
-      const FeatureKeypoints keypoints2 = cache_->GetKeypoints(data.image_id2);
+      const FeatureKeypoints keypoints1 = data.two_view_geometry.keypoints_1;
+      const FeatureKeypoints keypoints2 = data.two_view_geometry.keypoints_2;
       const FeatureDescriptors descriptors1 =
           cache_->GetDescriptors(data.image_id1);
       const FeatureDescriptors descriptors2 =
           cache_->GetDescriptors(data.image_id2);
+
       MatchGuidedSiftFeaturesCPU(options_, keypoints1, keypoints2, descriptors1,
                                  descriptors2, &data.two_view_geometry);
 
@@ -561,14 +564,14 @@ void GuidedSiftGPUFeatureMatcher::Run() {
       const FeatureDescriptors* descriptors1_ptr;
       const FeatureKeypoints* keypoints1_ptr;
       GetFeatureData(0, data.image_id1, &keypoints1_ptr, &descriptors1_ptr);
+      keypoints1_ptr = &data.two_view_geometry.keypoints_1;
       const FeatureDescriptors* descriptors2_ptr;
       const FeatureKeypoints* keypoints2_ptr;
       GetFeatureData(1, data.image_id2, &keypoints2_ptr, &descriptors2_ptr);
-
+      keypoints2_ptr = &data.two_view_geometry.keypoints_2;
       MatchGuidedSiftFeaturesGPU(options_, keypoints1_ptr, keypoints2_ptr,
                                  descriptors1_ptr, descriptors2_ptr,
                                  &sift_match_gpu, &data.two_view_geometry);
-
       CHECK(output_queue_->Push(data));
     }
   }
@@ -632,8 +635,8 @@ void TwoViewGeometryVerifier::Run() {
           cache_->GetCamera(cache_->GetImage(data.image_id1).CameraId());
       const auto& camera2 =
           cache_->GetCamera(cache_->GetImage(data.image_id2).CameraId());
-      const auto keypoints1 = cache_->GetKeypoints(data.image_id1);
-      const auto keypoints2 = cache_->GetKeypoints(data.image_id2);
+      FeatureKeypoints keypoints1 = cache_->GetKeypoints(data.image_id1);
+      FeatureKeypoints keypoints2 = cache_->GetKeypoints(data.image_id2);
       const auto points1 = FeatureKeypointsToPointsVector(keypoints1);
       const auto points2 = FeatureKeypointsToPointsVector(keypoints2);
 
@@ -642,9 +645,9 @@ void TwoViewGeometryVerifier::Run() {
                                                 points2, data.matches,
                                                 two_view_geometry_options_);
       } else {
-        data.two_view_geometry.Estimate(camera1, points1, camera2, points2,
-                                        data.matches,
-                                        two_view_geometry_options_);
+        data.two_view_geometry.EstimateCalibrated(camera1, keypoints1, camera2,
+                                                  keypoints2, data.matches,
+                                                  two_view_geometry_options_);
       }
 
       CHECK(output_queue_->Push(data));
@@ -809,7 +812,7 @@ void SiftFeatureMatcher::Match(
   image_pair_ids.reserve(image_pairs.size());
 
   size_t num_outputs = 0;
-  for (const auto image_pair : image_pairs) {
+  for (const auto& image_pair : image_pairs) {
     // Avoid self-matches.
     if (image_pair.first == image_pair.second) {
       continue;
@@ -876,8 +879,11 @@ void SiftFeatureMatcher::Match(
     }
 
     cache_->WriteMatches(output.image_id1, output.image_id2, output.matches);
-    cache_->WriteTwoViewGeometry(output.image_id1, output.image_id2,
-                                 output.two_view_geometry);
+
+    if (output.two_view_geometry.config ==
+        colmap::TwoViewGeometry::ConfigurationType::CALIBRATED)
+      cache_->WriteTwoViewGeometry(output.image_id1, output.image_id2,
+                                   output.two_view_geometry);
   }
 
   CHECK_EQ(output_queue_.Size(), 0);
@@ -951,7 +957,6 @@ void ExhaustiveFeatureMatcher::Run() {
 
       DatabaseTransaction database_transaction(&database_);
       matcher_.Match(image_pairs);
-
       PrintElapsedTime(timer);
     }
   }
@@ -1671,8 +1676,10 @@ void FeaturePairsFeatureMatcher::Run() {
     if (options_.verify_matches) {
       database_.WriteMatches(image1.ImageId(), image2.ImageId(), matches);
 
-      const auto keypoints1 = cache_.GetKeypoints(image1.ImageId());
-      const auto keypoints2 = cache_.GetKeypoints(image2.ImageId());
+      FeatureKeypoints keypoints1 = cache_.GetKeypoints(image1.ImageId());
+      FeatureKeypoints keypoints2 = cache_.GetKeypoints(image2.ImageId());
+      const auto points1 = FeatureKeypointsToPointsVector(keypoints1);
+      const auto points2 = FeatureKeypointsToPointsVector(keypoints2);
 
       TwoViewGeometry two_view_geometry;
       TwoViewGeometry::Options two_view_geometry_options;
@@ -1689,13 +1696,14 @@ void FeaturePairsFeatureMatcher::Run() {
       two_view_geometry_options.ransac_options.min_inlier_ratio =
           match_options_.min_inlier_ratio;
 
-      two_view_geometry.Estimate(
-          camera1, FeatureKeypointsToPointsVector(keypoints1), camera2,
-          FeatureKeypointsToPointsVector(keypoints2), matches,
-          two_view_geometry_options);
+      two_view_geometry.EstimateCalibrated(camera1, keypoints1, camera2,
+                                           keypoints2, matches,
+                                           two_view_geometry_options);
 
       database_.WriteTwoViewGeometry(image1.ImageId(), image2.ImageId(),
                                      two_view_geometry);
+      database_.WriteKeypoints(image1.ImageId(), keypoints1);
+      database_.WriteKeypoints(image2.ImageId(), keypoints2);
     } else {
       TwoViewGeometry two_view_geometry;
 

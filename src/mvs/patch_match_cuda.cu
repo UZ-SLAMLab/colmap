@@ -29,6 +29,8 @@
 //
 // Author: Johannes L. Schoenberger (jsch-at-demuc-dot-de)
 
+#include <cstdio>
+#include <iostream>
 #define _USE_MATH_DEFINES
 
 #include "mvs/patch_match_cuda.h"

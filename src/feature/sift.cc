@@ -33,6 +33,7 @@
 
 #include <array>
 #include <fstream>
+#include <iostream>
 #include <memory>
 
 #include "FLANN/flann.hpp"
@@ -1108,7 +1109,7 @@ bool CreateSiftGPUMatcher(const SiftMatchingOptions& match_options,
   } else {
     sift_match_gpu->SetLanguage(SiftMatchGPU::SIFTMATCH_CUDA);
   }
-#else   // CUDA_ENABLED
+#else  // CUDA_ENABLED
   sift_match_gpu->SetLanguage(SiftMatchGPU::SIFTMATCH_GLSL);
 #endif  // CUDA_ENABLED
 
@@ -1279,6 +1280,7 @@ void MatchGuidedSiftFeaturesGPU(const SiftMatchingOptions& match_options,
                  "insufficient GPU memory. Consider reducing the maximum "
                  "number of features."
               << std::endl;
+
     two_view_geometry->inlier_matches.clear();
   } else {
     CHECK_LE(num_matches, two_view_geometry->inlier_matches.size());

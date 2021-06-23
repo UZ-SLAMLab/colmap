@@ -55,13 +55,13 @@ struct BundleAdjustmentOptions {
   double loss_function_scale = 1.0;
 
   // Whether to refine the focal length parameter group.
-  bool refine_focal_length = true;
+  bool refine_focal_length = false;
 
   // Whether to refine the principal point parameter group.
   bool refine_principal_point = false;
 
   // Whether to refine the extra parameter group.
-  bool refine_extra_params = true;
+  bool refine_extra_params = false;
 
   // Whether to refine the extrinsic parameter group.
   bool refine_extrinsics = true;

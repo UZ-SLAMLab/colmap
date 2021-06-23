@@ -37,8 +37,6 @@
 #include "estimators/similarity_transform.h"
 #include "optim/loransac.h"
 
-#include <fstream>
-
 namespace colmap {
 namespace {
 
@@ -196,14 +194,6 @@ SimilarityTransform3::SimilarityTransform3(const double scale,
   transform_.matrix() = matrix;
 }
 
-void SimilarityTransform3::Write(const std::string& path) {
-  std::ofstream file(path, std::ios::trunc);
-  CHECK(file.is_open()) << path;
-  // Ensure that we don't loose any precision by storing in text.
-  file.precision(17);
-  file << transform_.matrix() << std::endl;
-}
-
 SimilarityTransform3 SimilarityTransform3::Inverse() const {
   return SimilarityTransform3(transform_.inverse());
 }
@@ -252,21 +242,6 @@ Eigen::Vector4d SimilarityTransform3::Rotation() const {
 
 Eigen::Vector3d SimilarityTransform3::Translation() const {
   return Matrix().block<3, 1>(0, 3);
-}
-
-SimilarityTransform3 SimilarityTransform3::FromFile(const std::string& path) {
-  std::ifstream file(path);
-  CHECK(file.is_open()) << path;
-
-  Eigen::Matrix4d matrix = Eigen::MatrixXd::Identity(4, 4);
-  for (int i = 0; i < matrix.rows(); ++i) {
-    for (int j = 0; j < matrix.cols(); ++j) {
-      file >> matrix(i, j);
-    }
-  }
-  SimilarityTransform3 tform;
-  tform.transform_.matrix() = matrix;
-  return tform;
 }
 
 bool ComputeAlignmentBetweenReconstructions(

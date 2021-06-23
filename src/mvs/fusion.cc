@@ -295,8 +295,8 @@ void StereoFusion::Run() {
     const auto& fused_pixel_mask = fused_pixel_masks_.at(image_idx);
 
     for (int row_start = 0; row_start < height; row_start += kRowStride) {
-      thread_pool.AddTask(ProcessImageRows, row_start, height, width,
-                            image_idx, fused_pixel_mask);
+      thread_pool.AddTask(ProcessImageRows, row_start, height, width, image_idx,
+                          fused_pixel_mask);
     }
     thread_pool.Wait();
 

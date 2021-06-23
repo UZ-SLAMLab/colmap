@@ -132,6 +132,11 @@ def main():
     plt.imshow(depth_map)
     plt.title("depth map")
 
+    # Visualize the depth map histogram.
+    plt.figure()
+    _ = plt.hist(depth_map, bins=5) 
+    plt.title("depth map histogram")
+
     # Visualize the normal map.
     plt.figure()
     plt.imshow(normal_map)
