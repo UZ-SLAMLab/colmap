@@ -133,38 +133,26 @@ struct TwoViewGeometry {
   // Invert the two-view geometry in-place.
   void Invert();
 
-  // Estimate only two-view geometry from calibrated image pair.
+  // Estimate two-view geometry from calibrated or uncalibrated image pair,
+  // depending on whether a prior focal length is given or not.
   //
   // @param camera1         Camera of first image.
-  // @param keypoints1      Feature points in first image.
+  // @param points1         Feature points in first image.
   // @param camera2         Camera of second image.
-  // @param keypoints2      Feature points in second image.
+  // @param points2         Feature points in second image.
   // @param matches         Feature matches between first and second image.
   // @param options         Two-view geometry estimation options.
+  void Estimate(const Camera& camera1, FeatureKeypoints& points1,
+                const std::vector<Eigen::Vector2d>& _points1,
+                const Camera& camera2, FeatureKeypoints& points2,
+                const std::vector<Eigen::Vector2d>& _points2,
+                const FeatureMatches& matches, const Options& options);
 
-  void EstimateCalibrated(const Camera& camera1,
-                          const FeatureKeypoints& keypoints1,
-                          const Camera& camera2,
-                          const FeatureKeypoints& keypoints2,
-                          const FeatureMatches& matches,
-                          const Options& options);
-
-  // Estimate only two-view geometry from calibrated image pair,
-  // for the two initial reconstruction images.
-  //
-  // @param camera1         Camera of first image.
-  // @param points1         Feature coordinates in first image.
-  // @param camera2         Camera of second image.
-  // @param points2         Feature coordinates in second image.
-  // @param matches         Feature matches between first and second image.
-  // @param options         Two-view geometry estimation options.
-
-  void EstimateInitCalibrated(const Camera& camera1,
-                              const std::vector<Eigen::Vector2d>& points1,
-                              const Camera& camera2,
-                              const std::vector<Eigen::Vector2d>& points2,
-                              const FeatureMatches& matches,
-                              const Options& options);
+  void Estimate(const Camera& camera1,
+                const std::vector<Eigen::Vector2d>& points1,
+                const Camera& camera2,
+                const std::vector<Eigen::Vector2d>& points2,
+                const FeatureMatches& matches, const Options& options);
 
   // Recursively estimate multiple configurations by removing the previous set
   // of inliers from the matches until not enough inliers are found. Inlier
@@ -197,43 +185,34 @@ struct TwoViewGeometry {
   // @param points2         Feature points in second image.
   // @param matches         Feature matches between first and second image.
   // @param options         Two-view geometry estimation options.
-
   bool EstimateRelativePose(const Camera& camera1,
                             const std::vector<Eigen::Vector2d>& points1,
                             const Camera& camera2,
                             const std::vector<Eigen::Vector2d>& points2);
 
-  // Estimate two-view geometry from calibrated image pair and
-  // the undistortionated key points are saved for guided matching.
+  // Estimate two-view geometry from calibrated image pair.
   //
   // @param camera1         Camera of first image.
-  // @param keypoints1      Feature points in first image.
+  // @param points1         Feature points in first image.
   // @param camera2         Camera of second image.
-  // @param keypoints2      Feature points in second image.
+  // @param points2         Feature points in second image.
   // @param matches         Feature matches between first and second image.
   // @param options         Two-view geometry estimation options.
+  void EstimateCalibrated(const Camera& camera1,
+                          const FeatureKeypoints& points1,
+                          const std::vector<Eigen::Vector2d>& _points1,
+                          const Camera& camera2,
+                          const FeatureKeypoints& points2,
+                          const std::vector<Eigen::Vector2d>& _points2,
+                          const FeatureMatches& matches,
+                          const Options& options);
 
-  void EstimateCalibratedGeometry(const Camera& camera1,
-                                  const FeatureKeypoints& keypoints1,
-                                  const Camera& camera2,
-                                  const FeatureKeypoints& keypoints2,
-                                  const FeatureMatches& matches,
-                                  const Options& options);
-
-  // Estimate two-view geometry from calibrated image pair
-  // the undistortionated key points don't be saved.
-  //
-  // @param camera1         Camera of first image.
-  // @param points1         Feature coordinates in first image.
-  // @param camera2         Camera of second image.
-  // @param points2         Feature coordinates in second image.
-  // @param matches         Feature matches between first and second image.
-  // @param options         Two-view geometry estimation options.
-
-  void EstimateInitCalibratedGeometry(
-      const Camera& camera1, const std::vector<Eigen::Vector2d>& points1,
-      const Camera& camera2, const std::vector<Eigen::Vector2d>& points2,
-      const FeatureMatches& matches, const Options& options);
+  void EstimateCalibratedPoints(const Camera& camera1,
+                                const std::vector<Eigen::Vector2d>& points1,
+                                const Camera& camera2,
+                                const std::vector<Eigen::Vector2d>& points2,
+                                const FeatureMatches& matches,
+                                const Options& options);
 
   // Estimate two-view geometry from uncalibrated image pair.
   //

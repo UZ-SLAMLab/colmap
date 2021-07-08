@@ -114,31 +114,32 @@ void TwoViewGeometry::Invert() {
   }
 }
 
-void TwoViewGeometry::EstimateCalibrated(const Camera& camera1,
-                                         const FeatureKeypoints& keypoints1,
-                                         const Camera& camera2,
-                                         const FeatureKeypoints& keypoints2,
-                                         const FeatureMatches& matches,
-                                         const Options& options) {
+void TwoViewGeometry::Estimate(const Camera& camera1, FeatureKeypoints& points1,
+                               const std::vector<Eigen::Vector2d>& _points1,
+                               const Camera& camera2, FeatureKeypoints& points2,
+                               const std::vector<Eigen::Vector2d>& _points2,
+                               const FeatureMatches& matches,
+                               const Options& options) {
   if (camera1.HasPriorFocalLength() && camera2.HasPriorFocalLength()) {
-    EstimateCalibratedGeometry(camera1, keypoints1, camera2, keypoints2,
-                               matches, options);
+    EstimateCalibrated(camera1, points1, _points1, camera2, points2, _points2,
+                       matches, options);
   } else {
-    std::cout << "The camera calibration is needed for both images."
-              << std::endl;
-    std::cout << "Please introduce the focal length and the principal point "
-              << "and use the same camera for all images." << std::endl;
-    exit(1);
+    std::cout << "No calibrado" << std::endl;
+    /*EstimateUncalibrated(camera1, FeatureKeypointsToPointsVector(points1),
+                         camera2, FeatureKeypointsToPointsVector(points2),
+                         matches, options);*/
   }
 }
 
-void TwoViewGeometry::EstimateInitCalibrated(
-    const Camera& camera1, const std::vector<Eigen::Vector2d>& points1,
-    const Camera& camera2, const std::vector<Eigen::Vector2d>& points2,
-    const FeatureMatches& matches, const Options& options) {
+void TwoViewGeometry::Estimate(const Camera& camera1,
+                               const std::vector<Eigen::Vector2d>& points1,
+                               const Camera& camera2,
+                               const std::vector<Eigen::Vector2d>& points2,
+                               const FeatureMatches& matches,
+                               const Options& options) {
   if (camera1.HasPriorFocalLength() && camera2.HasPriorFocalLength()) {
-    EstimateInitCalibratedGeometry(camera1, points1, camera2, points2, matches,
-                                   options);
+    EstimateCalibratedPoints(camera1, points1, camera2, points2, matches,
+                             options);
   } else {
     EstimateUncalibrated(camera1, points1, camera2, points2, matches, options);
   }
@@ -151,10 +152,11 @@ void TwoViewGeometry::EstimateMultiple(
   FeatureMatches remaining_matches = matches;
   std::vector<TwoViewGeometry> two_view_geometries;
 
+  std::cout << "EstimateMultiple" << std::endl;
   while (true) {
     TwoViewGeometry two_view_geometry;
-    two_view_geometry.EstimateInitCalibrated(camera1, points1, camera2, points2,
-                                             remaining_matches, options);
+    two_view_geometry.Estimate(camera1, points1, camera2, points2,
+                               remaining_matches, options);
     if (two_view_geometry.config == ConfigurationType::DEGENERATE) {
       break;
     }
@@ -249,31 +251,46 @@ bool TwoViewGeometry::EstimateRelativePose(
   return true;
 }
 
-void TwoViewGeometry::EstimateCalibratedGeometry(
-    const Camera& camera1, const FeatureKeypoints& keypoints1,
-    const Camera& camera2, const FeatureKeypoints& keypoints2,
-    const FeatureMatches& matches, const Options& options) {
+void TwoViewGeometry::EstimateCalibrated(
+    const Camera& camera1, const FeatureKeypoints& points1,
+    const std::vector<Eigen::Vector2d>& _points1, const Camera& camera2,
+    const FeatureKeypoints& points2,
+    const std::vector<Eigen::Vector2d>& _points2, const FeatureMatches& matches,
+    const Options& options) {
   options.Check();
+
+  // std::cout << std::endl << "Key Point 1 x: " << _points1[0][0] << std::endl;
+  // std::cout << "Key Point 1 y: " << _points1[0][1] << std::endl;
 
   if (matches.size() < options.min_num_inliers) {
     config = ConfigurationType::DEGENERATE;
     return;
   }
 
-  // Save the key points in the two-view geometry.
-  keypoints_1 = keypoints1;
-  keypoints_2 = keypoints2;
-
   // Extract corresponding points.
   std::vector<Eigen::Vector2d> matched_points1_normalized(matches.size());
   std::vector<Eigen::Vector2d> matched_points2_normalized(matches.size());
+  std::vector<Eigen::Vector2d> matched_points1(matches.size());
+  std::vector<Eigen::Vector2d> matched_points2(matches.size());
+
+  keypoints_1 = points1;
+  keypoints_2 = points2;
+
+  // Undistortionated points
+  std::vector<Eigen::Vector2d> matched_points1_unidistortionated(
+      matches.size());
+  std::vector<Eigen::Vector2d> matched_points2_unidistortionated(
+      matches.size());
 
   for (size_t i = 0; i < matches.size(); ++i) {
     const point2D_t idx1 = matches[i].point2D_idx1;
     const point2D_t idx2 = matches[i].point2D_idx2;
 
-    Eigen::Vector2d pt_1(keypoints1[idx1].x, keypoints1[idx1].y);
-    Eigen::Vector2d pt_2(keypoints2[idx2].x, keypoints2[idx2].y);
+    Eigen::Vector2d pt_1(points1[idx1].x, points1[idx1].y);
+    Eigen::Vector2d pt_2(points2[idx2].x, points2[idx2].y);
+
+    matched_points1[i] = pt_1;
+    matched_points2[i] = pt_2;
 
     matched_points1_normalized[i] = camera1.ImageToWorld(pt_1);
     matched_points2_normalized[i] = camera2.ImageToWorld(pt_2);
@@ -293,42 +310,36 @@ void TwoViewGeometry::EstimateCalibratedGeometry(
       E_ransac.Estimate(matched_points1_normalized, matched_points2_normalized);
   E = E_report.model;
 
-  CHECK_EQ(camera1.FocalLengthX(), camera2.FocalLengthX());
-  CHECK_EQ(camera1.FocalLengthY(), camera2.FocalLengthY());
+  // std::cout << "Matriz Esencial" << std::endl;
+  // std::cout << E << std::endl;
 
   // Get coordenates of focal length
   double f_x = camera1.FocalLengthX();
   double f_y = camera1.FocalLengthY();
 
-  CHECK_EQ(camera1.PrincipalPointX(), camera2.PrincipalPointX());
-  CHECK_EQ(camera1.PrincipalPointY(), camera2.PrincipalPointY());
-
   // Get coordenates of principal point
   double c_x = camera1.PrincipalPointX();
   double c_y = camera1.PrincipalPointY();
 
-  // Calculate the matrix K
+  // Createa an undistortionate matrx K
   Eigen::MatrixXd K(3, 3);
   K << f_x, 0.0f, c_x, 0.0f, f_y, c_y, 0.0f, 0.0f, 1.0f;
 
-  // Calculate a undistortionated F matrix.
+  // Calculate a undistortionated F matrix
   F = K.transpose().inverse() * E * K.inverse();
 
-  // Undistortionate key points in both images
   for (FeatureKeypoint& keypoint : keypoints_1) {
     Eigen::Vector2d pt_1(keypoint.x, keypoint.y);
-    // Undistortionated key poits coordinates in first image.
-    Eigen::Vector2d und_1 = camera1.ImageToWorld(pt_1);
-    keypoint.x = und_1[0] * f_x + c_x;
-    keypoint.y = und_1[1] * f_y + c_y;
+    Eigen::Vector2d u_v_1 = camera1.ImageToWorld(pt_1);
+    keypoint.x = u_v_1[0] * f_x + c_x;
+    keypoint.y = u_v_1[1] * f_y + c_y;
   }
 
   for (FeatureKeypoint& keypoint : keypoints_2) {
     Eigen::Vector2d pt_2(keypoint.x, keypoint.y);
-    // Undistortionated key poits coordinates in second image.
-    Eigen::Vector2d und_2 = camera2.ImageToWorld(pt_2);
-    keypoint.x = und_2[0] * f_x + c_x;
-    keypoint.y = und_2[1] * f_y + c_y;
+    Eigen::Vector2d u_v_2 = camera2.ImageToWorld(pt_2);
+    keypoint.x = u_v_2[0] * f_x + c_x;
+    keypoint.y = u_v_2[1] * f_y + c_y;
   }
 
   if ((!E_report.success) ||
@@ -357,7 +368,7 @@ void TwoViewGeometry::EstimateCalibratedGeometry(
   }
 }
 
-void TwoViewGeometry::EstimateInitCalibratedGeometry(
+void TwoViewGeometry::EstimateCalibratedPoints(
     const Camera& camera1, const std::vector<Eigen::Vector2d>& points1,
     const Camera& camera2, const std::vector<Eigen::Vector2d>& points2,
     const FeatureMatches& matches, const Options& options) {

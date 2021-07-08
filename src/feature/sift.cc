@@ -1025,6 +1025,20 @@ void MatchGuidedSiftFeaturesCPU(const SiftMatchingOptions& match_options,
   const Eigen::Matrix3f F = two_view_geometry->F.cast<float>();
   const Eigen::Matrix3f H = two_view_geometry->H.cast<float>();
 
+  for (const FeatureKeypoint& kp : keypoints1) {
+    if (true) {
+      std::cout << "fundamental matrix: " << std::endl;
+      std::cout << F << std::endl;
+      std::cout << "coord x und: " << kp.x << std::endl;
+      std::cout << "coord y und: " << kp.y << std::endl;
+      std::cout << "line in 2: " << std::endl;
+      const Eigen::Vector3f p(kp.x, kp.y, 1.0f);
+      std::cout << F * p << std::endl;
+
+      exit(1);
+    }
+  }
+
   std::function<bool(float, float, float, float)> guided_filter;
   if (two_view_geometry->config == TwoViewGeometry::CALIBRATED ||
       two_view_geometry->config == TwoViewGeometry::UNCALIBRATED) {

@@ -499,6 +499,9 @@ void GuidedSiftCPUFeatureMatcher::Run() {
       const FeatureDescriptors descriptors2 =
           cache_->GetDescriptors(data.image_id2);
 
+      // std::cout << "ID 1" << data.image_id1;
+      // std::cout << "ID 2" << data.image_id2;
+
       MatchGuidedSiftFeaturesCPU(options_, keypoints1, keypoints2, descriptors1,
                                  descriptors2, &data.two_view_geometry);
 
@@ -645,9 +648,9 @@ void TwoViewGeometryVerifier::Run() {
                                                 points2, data.matches,
                                                 two_view_geometry_options_);
       } else {
-        data.two_view_geometry.EstimateCalibrated(camera1, keypoints1, camera2,
-                                                  keypoints2, data.matches,
-                                                  two_view_geometry_options_);
+        data.two_view_geometry.Estimate(camera1, keypoints1, points1, camera2,
+                                        keypoints2, points2, data.matches,
+                                        two_view_geometry_options_);
       }
 
       CHECK(output_queue_->Push(data));
@@ -1696,9 +1699,9 @@ void FeaturePairsFeatureMatcher::Run() {
       two_view_geometry_options.ransac_options.min_inlier_ratio =
           match_options_.min_inlier_ratio;
 
-      two_view_geometry.EstimateCalibrated(camera1, keypoints1, camera2,
-                                           keypoints2, matches,
-                                           two_view_geometry_options);
+      two_view_geometry.Estimate(camera1, keypoints1, points1, camera2,
+                                 keypoints2, points2, matches,
+                                 two_view_geometry_options);
 
       database_.WriteTwoViewGeometry(image1.ImageId(), image2.ImageId(),
                                      two_view_geometry);
